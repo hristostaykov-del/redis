@@ -37,7 +37,9 @@ MI_SOURCES= \
     src/page-map.c \
     src/random.c \
     src/stats.c \
-    src/prim/prim.c
+    src/prim/prim.c \
+    src/theap.c \
+    src/threadlocal.c
 
 MI_OBJECTS= $(MI_SOURCES:.c=.o)
 
