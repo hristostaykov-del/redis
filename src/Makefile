@@ -310,6 +310,7 @@ ifeq ($(MALLOC),jemalloc)
 endif
 
 ifeq ($(MALLOC),mimalloc)
+	DEPENDENCY_TARGETS+= mimalloc
 	FINAL_CFLAGS+= -DUSE_MIMALLOC -I../deps/mimalloc/include
 	FINAL_LIBS := ../deps/mimalloc/lib/libmimalloc.a $(FINAL_LIBS)
 endif
