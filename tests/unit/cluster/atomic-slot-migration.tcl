@@ -729,6 +729,26 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
             set task_id [R 0 CLUSTER MIGRATION IMPORT 0 100]
 
             # The task should be failed due to the fail point
+            if {$state eq "streaming-buffer"} {
+                set proc_alive [catch {exec ps -p $load_handle -o pid=} ps_out]
+                puts "DEBUG: load proc $load_handle alive=[expr {$proc_alive == 0}]"
+                set stats1 [R 1 INFO commandstats]
+                set set_calls1 0
+                regexp {cmdstat_set:calls=(\d+)} $stats1 -> set_calls1
+                after 3000
+                set stats2 [R 1 INFO commandstats]
+                set set_calls2 0
+                regexp {cmdstat_set:calls=(\d+)} $stats2 -> set_calls2
+                puts "DEBUG: SET calls delta=[expr {$set_calls2 - $set_calls1}] (before=$set_calls1 after=$set_calls2)"
+                set proc_alive2 [catch {exec ps -p $load_handle -o pid=} ps_out2]
+                puts "DEBUG: load proc alive after 3s=[expr {$proc_alive2 == 0}]"
+                set clients [R 1 CLIENT LIST]
+                foreach line [split $clients "\n"] {
+                    if {[string match "*LOAD_HANDLER*" $line]} {
+                        puts "DEBUG: LOAD_HANDLER=$line"
+                    }
+                }
+            }
             wait_for_condition 2000 10 {
                 [string match -nocase "*$channel*${state}*" [migration_status 0 $task_id last_error]] ||
                 [string match -nocase "*$channel*${state}*" [migration_status 1 $task_id last_error]]
