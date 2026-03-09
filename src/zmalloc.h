@@ -16,8 +16,10 @@
 #define __str(s) #s
 
 #if defined(USE_MIMALLOC)
-
 #include <mimalloc.h>
+#define ZMALLOC_LIB ("mimalloc-" __xstr(MI_MALLOC_VERSION))
+#define HAVE_MALLOC_SIZE 1
+#define zmalloc_size(p) mi_malloc_usable_size(p)
 
 #elif defined(USE_TCMALLOC)
 #define ZMALLOC_LIB ("tcmalloc-" __xstr(TC_VERSION_MAJOR) "." __xstr(TC_VERSION_MINOR))
