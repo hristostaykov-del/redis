@@ -1,10 +1,11 @@
 # Mimalloc Makefile for Redis dependency build
 # Produces lib/libmimalloc.a as a static library
 
-STD= -std=gnu11
-WARN= -Wall -Wextra -Wno-unknown-pragmas -Wstrict-prototypes
-OPT= -O3
-DEBUG= -g
+# Inherit flags from parent make when provided.
+STD ?= -std=gnu11
+WARN ?= -Wall -Wextra -Wno-unknown-pragmas -Wstrict-prototypes
+OPT ?=
+DEBUG ?=
 
 MI_CFLAGS= $(STD) $(WARN) $(OPT) $(DEBUG) $(CFLAGS) \
            -Iinclude \
@@ -17,6 +18,7 @@ MI_CFLAGS= $(STD) $(WARN) $(OPT) $(DEBUG) $(CFLAGS) \
            -DMI_BUILD_RELEASE
 
 MI_CC=$(CC) $(MI_CFLAGS)
+MI_LDFLAGS=$(LDFLAGS)
 
 AR= ar
 ARFLAGS= rcs
