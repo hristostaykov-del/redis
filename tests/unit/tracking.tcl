@@ -876,6 +876,207 @@ start_server {tags {"tracking network logreqres:skip"}} {
     $rd close
 }
 
+start_server {tags {"tracking acl"}} {
+    # r = main harness client (default user): used for ACL SETUSER / DELUSER in the following tests.
+    # redis_client = second TCP connection to the same server so we can AUTH as a
+    # restricted user and run CLIENT TRACKING without switching the auth on r.
+
+    test {BCAST PREFIX registration allowed and send-time ACL filtering hides disallowed namespaces} {
+        r ACL SETUSER trackbcast on >abc ~public:* +@all
+        set rd_redirection [redis_deferring_client]
+        $rd_redirection client id
+        set redir_id [$rd_redirection read]
+        $rd_redirection subscribe __redis__:invalidate
+        $rd_redirection read ; # Consume the SUBSCRIBE reply.
+        set trk [redis_client]; # limited user; r stays default
+        assert_equal OK [$trk AUTH trackbcast abc]
+        assert_equal OK [$trk CLIENT TRACKING ON BCAST REDIRECT $redir_id PREFIX admin: PREFIX public:]
+        r MULTI
+        r SET admin:secret 1
+        r SET public:ok 1
+        r EXEC
+        set keys [lsort [lindex [$rd_redirection read] 2]]
+        assert_equal {public:ok} $keys
+        $trk CLIENT TRACKING OFF
+        $trk close
+        $rd_redirection close
+        r ACL DELUSER trackbcast
+    }
+
+    test {BCAST PREFIX adm filters keys by ACL at send time} {
+        r ACL SETUSER admiralbcast on >pw ~admiral:* +@all
+        set rd_redirection [redis_deferring_client]
+        $rd_redirection client id
+        set redir_id [$rd_redirection read]
+        $rd_redirection subscribe __redis__:invalidate
+        $rd_redirection read ; # Consume the SUBSCRIBE reply.
+        set trk [redis_client]; # limited user; r stays default
+        assert_equal OK [$trk AUTH admiralbcast pw]
+        assert_equal OK [$trk CLIENT TRACKING ON BCAST REDIRECT $redir_id PREFIX adm]
+        r MULTI
+        r SET admin:1 1
+        r SET admire 1
+        r SET admiral:1 1
+        r EXEC
+        set keys [lsort [lindex [$rd_redirection read] 2]]
+        assert_equal {admiral:1} $keys
+        $trk CLIENT TRACKING OFF
+        $trk close
+        $rd_redirection close
+        r ACL DELUSER admiralbcast
+    }
+
+    test {BCAST runtime ACL filtering: ~ab*, ~abc and ~a*cd} {
+        r ACL SETUSER prefixcover on >pw1 ~ab* +@all
+        set rd_cover [redis_deferring_client]
+        $rd_cover client id
+        set redir_cover [$rd_cover read]
+        $rd_cover subscribe __redis__:invalidate
+        $rd_cover read ; # Consume the SUBSCRIBE reply.
+        set trk_ok [redis_client]; # limited user; r stays default
+        assert_equal OK [$trk_ok AUTH prefixcover pw1]
+        assert_equal OK [$trk_ok CLIENT TRACKING ON BCAST REDIRECT $redir_cover PREFIX a]
+        r MULTI
+        r SET abc 1
+        r SET ax 1
+        r EXEC
+        set keys_cover [lsort [lindex [$rd_cover read] 2]]
+        assert_equal {abc} $keys_cover
+        $trk_ok CLIENT TRACKING OFF
+        $trk_ok close
+        $rd_cover close
+
+        r ACL SETUSER prefixexact on >pw3 ~abc +@all
+        set rd_exact [redis_deferring_client]
+        $rd_exact client id
+        set redir_exact [$rd_exact read]
+        $rd_exact subscribe __redis__:invalidate
+        $rd_exact read ; # Consume the SUBSCRIBE reply.
+        set trk_exact [redis_client]; # limited user; r stays default
+        assert_equal OK [$trk_exact AUTH prefixexact pw3]
+        assert_equal OK [$trk_exact CLIENT TRACKING ON BCAST REDIRECT $redir_exact PREFIX abc]
+        r MULTI
+        r SET abc 1
+        r SET abcd 1
+        r EXEC
+        set keys_exact [lsort [lindex [$rd_exact read] 2]]
+        assert_equal {abc} $keys_exact
+        $trk_exact CLIENT TRACKING OFF
+        $trk_exact close
+        $rd_exact close
+
+        r ACL SETUSER prefixoverlap on >pw2 ~a*cd +@all
+        set rd_overlap [redis_deferring_client]
+        $rd_overlap client id
+        set redir_overlap [$rd_overlap read]
+        $rd_overlap subscribe __redis__:invalidate
+        $rd_overlap read ; # Consume the SUBSCRIBE reply.
+        set trk_err [redis_client]; # limited user; r stays default
+        assert_equal OK [$trk_err AUTH prefixoverlap pw2]
+        assert_equal OK [$trk_err CLIENT TRACKING ON BCAST REDIRECT $redir_overlap PREFIX abc]
+        r MULTI
+        r SET abcd 1
+        r SET abce 1
+        r EXEC
+        set keys_overlap [lsort [lindex [$rd_overlap read] 2]]
+        assert_equal {abcd} $keys_overlap
+        $trk_err CLIENT TRACKING OFF
+        $trk_err close
+        $rd_overlap close
+
+        r ACL DELUSER prefixcover
+        r ACL DELUSER prefixexact
+        r ACL DELUSER prefixoverlap
+    }
+
+    test {BCAST without PREFIX filters invalidations for restricted key patterns} {
+        r ACL SETUSER trackall on >abc ~public:* +@all
+        set rd_redirection [redis_deferring_client]
+        $rd_redirection client id
+        set redir_id [$rd_redirection read]
+        $rd_redirection subscribe __redis__:invalidate
+        $rd_redirection read ; # Consume the SUBSCRIBE reply.
+        set trk [redis_client]; # limited user; r stays default
+        assert_equal OK [$trk AUTH trackall abc]
+        assert_equal OK [$trk CLIENT TRACKING ON BCAST REDIRECT $redir_id]
+        r MULTI
+        r SET public:1 1
+        r SET admin:1 1
+        r EXEC
+        set keys [lsort [lindex [$rd_redirection read] 2]]
+        assert_equal {public:1} $keys
+        $trk CLIENT TRACKING OFF
+        $trk close
+        $rd_redirection close
+        r ACL DELUSER trackall
+    }
+
+    test {BCAST without PREFIX sends all changed keys for allkeys user} {
+        r ACL SETUSER trackall2 on >abc allkeys +@all
+        set rd_redirection [redis_deferring_client]
+        $rd_redirection client id
+        set redir_id [$rd_redirection read]
+        $rd_redirection subscribe __redis__:invalidate
+        $rd_redirection read ; # Consume the SUBSCRIBE reply.
+        set trk [redis_client]; # limited user; r stays default
+        assert_equal OK [$trk AUTH trackall2 abc]
+        assert_equal OK [$trk CLIENT TRACKING ON BCAST REDIRECT $redir_id]
+        r MULTI
+        r SET public:2 1
+        r SET admin:2 1
+        r EXEC
+        set keys [lsort [lindex [$rd_redirection read] 2]]
+        assert_equal {admin:2 public:2} $keys
+        $trk CLIENT TRACKING OFF
+        $trk close
+        $rd_redirection close
+        r ACL DELUSER trackall2
+    }
+
+    test {BCAST two clients sharing same ACL user receive identical invalidation set} {
+        r ACL SETUSER shareduser on >pass ~public:* +@all
+
+        set rd1 [redis_deferring_client]
+        $rd1 client id
+        set redir1 [$rd1 read]
+        $rd1 subscribe __redis__:invalidate
+        $rd1 read
+
+        set rd2 [redis_deferring_client]
+        $rd2 client id
+        set redir2 [$rd2 read]
+        $rd2 subscribe __redis__:invalidate
+        $rd2 read
+
+        set trk1 [redis_client]
+        assert_equal OK [$trk1 AUTH shareduser pass]
+        assert_equal OK [$trk1 CLIENT TRACKING ON BCAST REDIRECT $redir1 PREFIX public:]
+
+        set trk2 [redis_client]
+        assert_equal OK [$trk2 AUTH shareduser pass]
+        assert_equal OK [$trk2 CLIENT TRACKING ON BCAST REDIRECT $redir2 PREFIX public:]
+
+        r MULTI
+        r SET public:a 1
+        r SET admin:b 1
+        r EXEC
+
+        set keys1 [lsort [lindex [$rd1 read] 2]]
+        set keys2 [lsort [lindex [$rd2 read] 2]]
+        assert_equal {public:a} $keys1
+        assert_equal {public:a} $keys2
+
+        $trk1 CLIENT TRACKING OFF
+        $trk2 CLIENT TRACKING OFF
+        $trk1 close
+        $trk2 close
+        $rd1 close
+        $rd2 close
+        r ACL DELUSER shareduser
+    }
+
+}
+
 # Just some extra coverage for --log-req-res, because we do not
 # run the full tracking unit in that mode
 start_server {tags {"tracking network"}} {
