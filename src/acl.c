@@ -2473,8 +2473,8 @@ sds ACLLoadFromFile(const char *filename) {
                 continue;
 
             /* Reassign c->user to the new user object (or kill if gone). */
-            user *new_current = ACLGetUserByName(c->user->name, sdslen(c->user->name));
-            if (!new_current) {
+            user *new = ACLGetUserByName(c->user->name, sdslen(c->user->name));
+            if (!new) {
                 deauthenticateAndCloseClient(c);
                 continue;
             }
@@ -2518,7 +2518,7 @@ sds ACLLoadFromFile(const char *filename) {
             }
 
             if (!killed) {
-                clientSetUser(c, new_current);
+                clientSetUser(c, new);
             }
         }
 
