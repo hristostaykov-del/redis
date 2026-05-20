@@ -950,6 +950,9 @@ size_t pubsubMemOverhead(client *c) {
 void pubsubRekeySubscriptionsForACLLoad(client *c) {
     dict *new_dict = dictCreate(&pubsubSubscriptionsDictType);
 
+    /* Walk the old dict and re-insert each entry under the corresponding
+     * new user pointer. old_user_ptr is still alive here (old_users rax
+     * is freed after the full client walk), so ->name is safe to read. */
     dictIterator di;
     dictEntry *entry;
     dictInitIterator(&di, c->pubsub_subscriptions);
@@ -962,6 +965,9 @@ void pubsubRekeySubscriptionsForACLLoad(client *c) {
     }
     dictResetIterator(&di);
 
+    /* Swap the old dict out without freeing the values — new_dict now owns
+     * them. We temporarily switch the old dict's type to one with no
+     * destructors so dictRelease only frees the table structure. */
     c->pubsub_subscriptions->type = &pubsubNoDestructorDictType;
     dictRelease(c->pubsub_subscriptions);
     c->pubsub_subscriptions = new_dict;
