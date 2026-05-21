@@ -1380,10 +1380,11 @@ typedef struct {
     robj *acl_string; /* cached string represent of ACLs */
 } user;
 
+/* Per-user Pub/Sub subscription state. */
 typedef struct pubsubUserSubs {
-    dict *channels;
-    dict *patterns;
-    dict *shard_channels;
+    dict *channels;       /* channels a client is interested in (SUBSCRIBE) */
+    dict *patterns;       /* patterns a client is interested in (PSUBSCRIBE) */
+    dict *shard_channels; /* shard level channels a client is interested in (SSUBSCRIBE) */
 } pubsubUserSubs;
 
 /* With multiplexing we need to take per-client state.
@@ -3898,10 +3899,8 @@ int pubsubTotalSubscriptions(void);
 int clientSubscriptionsCount(client *c);
 int clientShardSubscriptionsCount(client *c);
 int clientTotalPubSubSubscriptionCount(client *c);
-pubsubUserSubs *pubsubGetOrCreateUserSubs(client *c);
 void pubsubRekeySubscriptionsForACLLoad(client *c);
 int pubsubUserSubsIsEmpty(pubsubUserSubs *subs);
-int ACLShouldKillForUserSubs(pubsubUserSubs *subs, list *upcoming);
 
 /* Keyspace events notification */
 void notifyKeyspaceEvent(int type, const char *event, robj *key, int dbid);
