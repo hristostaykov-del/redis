@@ -17,7 +17,7 @@ proc entries_hist {r {dbnum 9}} {
     return ""
 }
 
-start_server {tags {"stream"}} {
+start_server {tags {"stream cluster:skip"}} {
     test {INFO stream is empty when stream-stats is disabled} {
         r select 9
         r config set stream-stats no
@@ -181,16 +181,18 @@ start_server {tags {"stream"}} {
         }
     }
 
-    test {Gauge is reconstructed from RDB on DEBUG RELOAD} {
-        r select 9
-        r flushall
-        r config set stream-stats yes
-        r xadd a 1-1 f v
-        for {set i 1} {$i <= 5} {incr i} { r xadd c $i-1 f v }
-        set before [entries_hist r]
-        r debug reload
-        assert_equal $before [entries_hist r]
-        assert_equal "1=1,4=1" [entries_hist r]
+    tags {"needs:debug"} {
+        test {Gauge is reconstructed from RDB on DEBUG RELOAD} {
+            r select 9
+            r flushall
+            r config set stream-stats yes
+            r xadd a 1-1 f v
+            for {set i 1} {$i <= 5} {incr i} { r xadd c $i-1 f v }
+            set before [entries_hist r]
+            r debug reload
+            assert_equal $before [entries_hist r]
+            assert_equal "1=1,4=1" [entries_hist r]
+        }
     }
 
     test {Per-database lines are independent} {
@@ -229,10 +231,12 @@ start_server {tags {"stream"}} {
         assert_equal "8=1" [entries_hist r]
     }
 
-    test {Lazy: a reload makes the histogram fully accurate} {
-        # Continues from the previous test's dataset (untouched=1, touched=8).
-        r select 9
-        r debug reload
-        assert_equal "1=1,8=1" [entries_hist r]
+    tags {"needs:debug"} {
+        test {Lazy: a reload makes the histogram fully accurate} {
+            # Continues from the previous test's dataset (untouched=1, touched=8).
+            r select 9
+            r debug reload
+            assert_equal "1=1,8=1" [entries_hist r]
+        }
     }
 }

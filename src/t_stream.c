@@ -125,52 +125,86 @@ unsigned long streamLength(const robj *subject) {
 }
 
 /* ----------------------------------------------------------------------------
- * INFO `stream` statistics: distrib_streams_entries
+ * INFO `stream` statistics
  *
- * A per-database base-2 logarithmic histogram of stream entry counts (one
- * sample per stream key), reported by the INFO `stream` section. It is
- * maintained directly from the stream commands that change a stream's length
- * and from the stream key lifecycle hooks (streamKeyLoaded / streamKeyRemoved).
+ * Per-database base-2 logarithmic histograms of stream properties, reported by
+ * the INFO `stream` section (e.g. distrib_streams_entries). They are maintained
+ * directly from the stream commands that change the tracked property and from
+ * the stream key lifecycle hooks (streamKeyLoaded / streamKeyRemoved).
  *
- * Each stream remembers which histogram bin it currently occupies in
- * s->hist_entries_bin (-1 = not counted), so an update is a cheap move of one
- * sample from the old bin to the new one, done only when the bin changes.
+ * Each stream remembers which histogram bin it currently occupies (e.g.
+ * s->hist_entries_bin, -1 = not counted), so an update is a cheap move of one
+ * sample from the old bin to the new one. The recorded bin -- not the live
+ * length -- drives the decrement, which keeps the histogram consistent across a
+ * stream-stats enable/disable (changes made while disabled aren't tracked, but
+ * the next update still subtracts from the bucket the sample was last placed
+ * in, not from wherever the property happens to be now).
  *
  * Collection is lazy: it only runs while the `stream-stats` directive is
- * enabled. As a result the gauge is accurate when the directive is set at
+ * enabled. As a result the gauges are accurate when the directive is set at
  * startup or after an RDB reload (the load path counts every stream); enabling
- * it at runtime fills the histogram in lazily, as streams are subsequently
+ * it at runtime fills the histograms in lazily, as streams are subsequently
  * written. We intentionally avoid a full keyspace rescan on enable, which would
  * block the server when there are many keys.
  * -------------------------------------------------------------------------- */
 
+/* Selects which per-database stream histogram in kvstoreMetadata to update.
+ * Add one enumerator here (and one case in streamDistribHistRow) per metric. */
+typedef enum {
+    STREAM_DISTRIB_ENTRIES = 0,    /* distrib_streams_entries */
+} streamDistribMetric;
+
+/* Return the per-db histogram row for 'metric', or NULL if this db's kvstore
+ * carries no metadata (defensive; db->keys always has it in practice). */
+static int64_t *streamDistribHistRow(redisDb *db, streamDistribMetric metric) {
+    kvstoreMetadata *meta = kvstoreGetMetadata(db->keys);
+    if (!meta) return NULL;
+    switch (metric) {
+    case STREAM_DISTRIB_ENTRIES: return meta->distrib_streams_entries;
+    }
+    return NULL; /* unreachable: every metric has a case above */
+}
+
+/* Bin a non-negative stream property value (entry count, byte size, ...) the
+ * same way the keysizes histogram does: 0 -> bin 0, otherwise log2ceil(v)+1. */
+static inline int streamDistribBin(int64_t value) {
+    int bin = (value == 0) ? 0 : log2ceil(value) + 1;
+    debugServerAssert(bin < MAX_KEYSIZES_BINS);
+    return bin;
+}
+
+/* Generic update of a per-database stream histogram: move one sample from
+ * 'old_bin' to 'new_bin'. A bin of -1 means "no sample" (a stream entering or
+ * leaving the histogram). Shared by every metric via the 'metric' selector so
+ * we don't grow a near-identical function per metric; the caller supplies the
+ * bins (e.g. from a stream's recorded bin and its current property value). */
+static void streamUpdateDistribHist(redisDb *db, streamDistribMetric metric,
+                                    int old_bin, int new_bin)
+{
+    if (old_bin == new_bin) return;            /* sample didn't move */
+    int64_t *hist = streamDistribHistRow(db, metric);
+    if (!hist) return;
+    if (old_bin >= 0) {
+        hist[old_bin]--;
+        debugServerAssert(hist[old_bin] >= 0);
+    }
+    if (new_bin >= 0)
+        hist[new_bin]++;
+}
+
 /* Reconcile a stream's entries-histogram sample with its current length. */
 static void streamUpdateEntriesStat(redisDb *db, stream *s) {
     if (!server.stream_stats) return;
-    kvstoreMetadata *meta = kvstoreGetMetadata(db->keys);
-    if (!meta) return;
-
-    int newbin = (s->length == 0) ? 0 : log2ceil(s->length) + 1;
-    debugServerAssert(newbin < MAX_KEYSIZES_BINS);
-    if (newbin == s->hist_entries_bin) return; /* no bin change, nothing to do */
-
-    if (s->hist_entries_bin >= 0) {
-        meta->distrib_streams_entries[s->hist_entries_bin]--;
-        debugServerAssert(meta->distrib_streams_entries[s->hist_entries_bin] >= 0);
-    }
-    meta->distrib_streams_entries[newbin]++;
-    s->hist_entries_bin = newbin;
+    int new_bin = streamDistribBin(s->length);
+    streamUpdateDistribHist(db, STREAM_DISTRIB_ENTRIES, s->hist_entries_bin, new_bin);
+    s->hist_entries_bin = new_bin;
 }
 
 /* Drop a stream's entries-histogram sample. Called when a stream key is removed
  * (the stream object is still alive at this point). */
 static void streamRemoveEntriesStat(redisDb *db, stream *s) {
     if (!server.stream_stats || s->hist_entries_bin < 0) return;
-    kvstoreMetadata *meta = kvstoreGetMetadata(db->keys);
-    if (!meta) return;
-
-    meta->distrib_streams_entries[s->hist_entries_bin]--;
-    debugServerAssert(meta->distrib_streams_entries[s->hist_entries_bin] >= 0);
+    streamUpdateDistribHist(db, STREAM_DISTRIB_ENTRIES, s->hist_entries_bin, -1);
     s->hist_entries_bin = -1;
 }
 
