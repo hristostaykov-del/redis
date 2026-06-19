@@ -6282,42 +6282,44 @@ void totalNumberOfStatefulKeys(unsigned long *blocking_keys, unsigned long *bloc
         *watched_keys = wkeys;
 }
 
-/* Cumulative bin labels for the base-2 logarithmic histograms shared by the
- * keysizes and stream INFO sections (bin i -> 2^(i-1), bin 0 -> "0"). */
-static const char *expSizeLabels[] = {
-    "0", "1",   "2",  "4",  "8",  "16",  "32",  "64",  "128",  "256",  "512", /* Byte */
-    "1K", "2K", "4K", "8K", "16K", "32K", "64K", "128K", "256K", "512K", /* Kilo */
-    "1M", "2M", "4M", "8M", "16M", "32M", "64M", "128M", "256M", "512M", /* Mega */
-    "1G", "2G", "4G", "8G", "16G", "32G", "64G", "128G", "256G", "512G", /* Giga */
-    "1T", "2T", "4T", "8T", "16T", "32T", "64T", "128T", "256T", "512T", /* Tera */
-    "1P", "2P", "4P", "8P", "16P", "32P", "64P", "128P", "256P", "512P", /* Peta */
-    "1E", "2E", "4E"                                                     /* Exa */
-};
-
 /* Append keysizes histograms to the info string in format "db<dbnum>_<field_name>:<label>=<count>,..."
  * field_names is an array of field names indexed by type, NULL entries are skipped. */
+/* Append a single base-2 histogram row as "db<N>_<field>:<label>=<count>,...".
+ * Only non-empty bins are listed; the line is omitted when the row is empty. */
+static sds sdscatHistogramRow(sds info, int dbnum, const char *field, const int64_t *row) {
+    static const char *expSizeLabels[] = {
+        "0", "1",   "2",  "4",  "8",  "16",  "32",  "64",  "128",  "256",  "512", /* Byte */
+        "1K", "2K", "4K", "8K", "16K", "32K", "64K", "128K", "256K", "512K", /* Kilo */
+        "1M", "2M", "4M", "8M", "16M", "32M", "64M", "128M", "256M", "512M", /* Mega */
+        "1G", "2G", "4G", "8G", "16G", "32G", "64G", "128G", "256G", "512G", /* Giga */
+        "1T", "2T", "4T", "8T", "16T", "32T", "64T", "128T", "256T", "512T", /* Tera */
+        "1P", "2P", "4P", "8P", "16P", "32P", "64P", "128P", "256P", "512P", /* Peta */
+        "1E", "2E", "4E"                                                     /* Exa */
+    };
+
+    char buf[10000];
+    int cnt = 0, buflen = 0;
+
+    buflen += snprintf(buf + buflen, sizeof(buf) - buflen, "db%d_%s:", dbnum, field);
+
+    for (int i = 0; i < MAX_KEYSIZES_BINS; i++) {
+        if (row[i] == 0) continue;
+        int res = snprintf(buf + buflen, sizeof(buf) - buflen,
+                           (cnt == 0) ? "%s=%llu" : ",%s=%llu",
+                           expSizeLabels[i], (unsigned long long) row[i]);
+        if (res < 0) break;
+        buflen += res;
+        cnt += row[i];
+    }
+
+    if (cnt) info = sdscatprintf(info, "%s\r\n", buf);
+    return info;
+}
+
 static sds sdscatHistograms(sds info, int dbnum, keysizesHist histogram, const char *field_names[]) {
     for (int type = 0; type < OBJ_TYPE_BASIC_MAX; type++) {
         if (field_names[type] == NULL) continue;
-
-        char buf[10000];
-        int cnt = 0, buflen = 0;
-
-        buflen += snprintf(buf + buflen, sizeof(buf) - buflen, "db%d_%s:", dbnum, field_names[type]);
-
-        for (int i = 0; i < MAX_KEYSIZES_BINS; i++) {
-            if (histogram[type][i] == 0)
-                continue;
-
-            int res = snprintf(buf + buflen, sizeof(buf) - buflen,
-                               (cnt == 0) ? "%s=%llu" : ",%s=%llu",
-                               expSizeLabels[i], (unsigned long long) histogram[type][i]);
-            if (res < 0) break;
-            buflen += res;
-            cnt += histogram[type][i];
-        }
-
-        if (cnt) info = sdscatprintf(info, "%s\r\n", buf);
+        info = sdscatHistogramRow(info, dbnum, field_names[type], histogram[type]);
     }
     return info;
 }
@@ -7047,22 +7049,8 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
             for (int dbnum = 0; dbnum < server.dbnum; dbnum++) {
                 kvstoreMetadata *meta = kvstoreGetMetadata(server.db[dbnum].keys);
                 if (!meta) continue;
-
-                int64_t *hist = meta->distrib_streams_entries;
-                char buf[10000];
-                int cnt = 0, buflen = 0;
-                buflen += snprintf(buf + buflen, sizeof(buf) - buflen,
-                                   "db%d_distrib_streams_entries:", dbnum);
-                for (int i = 0; i < MAX_KEYSIZES_BINS; i++) {
-                    if (hist[i] == 0) continue;
-                    int res = snprintf(buf + buflen, sizeof(buf) - buflen,
-                                       (cnt == 0) ? "%s=%lld" : ",%s=%lld",
-                                       expSizeLabels[i], (long long) hist[i]);
-                    if (res < 0) break;
-                    buflen += res;
-                    cnt += hist[i];
-                }
-                if (cnt) info = sdscatprintf(info, "%s\r\n", buf);
+                info = sdscatHistogramRow(info, dbnum, "distrib_streams_entries",
+                                          meta->distrib_streams_entries);
             }
         }
     }

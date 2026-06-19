@@ -2421,20 +2421,6 @@ static int updateMemoryTrackingEnabled(const char **err) {
     return 1;
 }
 
-/* Apply callback for the `stream-stats` directive.
- *
- * Collection is intentionally lazy: there is deliberately no rebuild/rescan
- * here. Enabling stream-stats at runtime would otherwise require scanning the
- * whole keyspace to find and count existing streams, which can block the server
- * when there are very many keys. Instead the histogram is accurate when the
- * directive is set at startup or after an RDB reload (the load path counts every
- * stream as it is loaded); enabling it at runtime fills the histogram in lazily,
- * as streams are subsequently written. Disabling simply stops collection. */
-static int applyStreamStats(const char **err) {
-    UNUSED(err);
-    return 1;
-}
-
 static int isValidAnnouncedNodename(char *val,const char **err) {
     if (!(isValidAuxString(val,sdslen(val)))) {
         *err = "Announced human node name contained invalid character";
@@ -3225,7 +3211,7 @@ standardConfig static_configs[] = {
     createEnumConfig("cluster-slot-stats-enabled", NULL, MODIFIABLE_CONFIG | MULTI_ARG_CONFIG, cluster_slot_stats_enum, server.cluster_slot_stats_enabled, 0, NULL, updateMemoryTrackingEnabled),
     createBoolConfig("lua-enable-deprecated-api", NULL, IMMUTABLE_CONFIG | HIDDEN_CONFIG, server.lua_enable_deprecated_api, 0, NULL, NULL),
     createBoolConfig("key-memory-histograms", NULL, MODIFIABLE_CONFIG, server.key_memory_histograms, 0, NULL, updateMemoryTrackingEnabled),
-    createBoolConfig("stream-stats", NULL, MODIFIABLE_CONFIG, server.stream_stats, 0, NULL, applyStreamStats),
+    createBoolConfig("stream-stats", NULL, MODIFIABLE_CONFIG, server.stream_stats, 0, NULL, NULL),
 
     /* String Configs */
     createStringConfig("aclfile", NULL, IMMUTABLE_CONFIG, ALLOW_EMPTY_STRING, server.acl_filename, "", NULL, NULL),

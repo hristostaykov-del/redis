@@ -1229,7 +1229,7 @@ typedef int64_t keysizesHist[MAX_KEYSIZES_TYPES][MAX_KEYSIZES_BINS];
 typedef struct {
     keysizesHist keysizes_hist;
     keysizesHist allocsizes_hist;
-    int64_t distrib_streams_entries[MAX_KEYSIZES_BINS]; // XADD++, XTRIM-- ...
+    int64_t distrib_streams_entries[MAX_KEYSIZES_BINS];
 } kvstoreMetadata;
 
 /* Like kvstoreMetadata, this one per dict */
