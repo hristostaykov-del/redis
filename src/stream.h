@@ -50,6 +50,7 @@ typedef struct stream {
     rax *idmp_producers;   /* IDMP producers radix tree: pid -> idmpProducer */
     uint64_t iids_added;   /* All time count of entries with IID added. */
     uint64_t iids_duplicates; /* All time count of duplicate IIDs detected. */
+    int8_t hist_entries_bin; /* INFO stream: bin counted in entries histogram, -1 if none. */
 } stream;
 
 /* We define an iterator to iterate stream items in an abstract way, without

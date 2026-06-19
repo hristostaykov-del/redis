@@ -89,6 +89,7 @@ stream *streamNew(void) {
     s->idmp_producers = NULL; /* Created on demand to save memory when not used. */
     s->iids_added = 0;
     s->iids_duplicates = 0;
+    s->hist_entries_bin = -1;
     return s;
 }
 
@@ -121,6 +122,56 @@ void freeStream(stream *s) {
 unsigned long streamLength(const robj *subject) {
     stream *s = subject->ptr;
     return s->length;
+}
+
+/* ----------------------------------------------------------------------------
+ * INFO `stream` statistics: distrib_streams_entries
+ *
+ * A per-database base-2 logarithmic histogram of stream entry counts (one
+ * sample per stream key), reported by the INFO `stream` section. It is
+ * maintained directly from the stream commands that change a stream's length
+ * and from the stream key lifecycle hooks (streamKeyLoaded / streamKeyRemoved).
+ *
+ * Each stream remembers which histogram bin it currently occupies in
+ * s->hist_entries_bin (-1 = not counted), so an update is a cheap move of one
+ * sample from the old bin to the new one, done only when the bin changes.
+ *
+ * Collection is lazy: it only runs while the `stream-stats` directive is
+ * enabled. As a result the gauge is accurate when the directive is set at
+ * startup or after an RDB reload (the load path counts every stream); enabling
+ * it at runtime fills the histogram in lazily, as streams are subsequently
+ * written. We intentionally avoid a full keyspace rescan on enable, which would
+ * block the server when there are many keys.
+ * -------------------------------------------------------------------------- */
+
+/* Reconcile a stream's entries-histogram sample with its current length. */
+static void streamUpdateEntriesStat(redisDb *db, stream *s) {
+    if (!server.stream_stats) return;
+    kvstoreMetadata *meta = kvstoreGetMetadata(db->keys);
+    if (!meta) return;
+
+    int newbin = (s->length == 0) ? 0 : log2ceil(s->length) + 1;
+    debugServerAssert(newbin < MAX_KEYSIZES_BINS);
+    if (newbin == s->hist_entries_bin) return; /* no bin change, nothing to do */
+
+    if (s->hist_entries_bin >= 0) {
+        meta->distrib_streams_entries[s->hist_entries_bin]--;
+        debugServerAssert(meta->distrib_streams_entries[s->hist_entries_bin] >= 0);
+    }
+    meta->distrib_streams_entries[newbin]++;
+    s->hist_entries_bin = newbin;
+}
+
+/* Drop a stream's entries-histogram sample. Called when a stream key is removed
+ * (the stream object is still alive at this point). */
+static void streamRemoveEntriesStat(redisDb *db, stream *s) {
+    if (!server.stream_stats || s->hist_entries_bin < 0) return;
+    kvstoreMetadata *meta = kvstoreGetMetadata(db->keys);
+    if (!meta) return;
+
+    meta->distrib_streams_entries[s->hist_entries_bin]--;
+    debugServerAssert(meta->distrib_streams_entries[s->hist_entries_bin] >= 0);
+    s->hist_entries_bin = -1;
 }
 
 /* Set 'id' to be its successor stream ID.
@@ -2617,6 +2668,8 @@ void xaddCommand(client *c) {
     if (server.memory_tracking_enabled)
         updateSlotAllocSize(c->db,getKeySlot(c->argv[1]->ptr),kv,old_alloc,kvobjAllocSize(kv));
 
+    streamUpdateEntriesStat(c->db, s); /* entries count changed (append + trim) */
+
     keyModified(c,c->db,c->argv[1],kv,1);
 
     /* Let's rewrite the ID argument with the one actually generated for
@@ -3554,6 +3607,7 @@ NULL
             o = createStreamObject();
             dbAdd(c->db, c->argv[2], &o);
             s = o->ptr;
+            streamUpdateEntriesStat(c->db, s); /* count the new (empty) stream */
             keyModified(c,c->db,c->argv[2],o,1);
         }
         
@@ -4106,6 +4160,7 @@ void xackdelCommand(client *c) {
         }
 
         /* Propagate the write. */
+        streamUpdateEntriesStat(c->db, s); /* entries count decreased */
         keyModified(c,c->db,c->argv[1],kv,1);
         notifyKeyspaceEvent(NOTIFY_STREAM,"xdel",c->argv[1],c->db->id);
     } else if (server.dirty > dirty) {
@@ -4865,6 +4920,7 @@ void xdelCommand(client *c) {
 
     /* Propagate the write if needed. */
     if (deleted) {
+        streamUpdateEntriesStat(c->db, s); /* entries count decreased */
         keyModified(c,c->db,c->argv[1],kv,1);
         notifyKeyspaceEvent(NOTIFY_STREAM,"xdel",c->argv[1],c->db->id);
         server.dirty += deleted;
@@ -4969,6 +5025,7 @@ void xdelexCommand(client *c) {
         }
 
         /* Propagate the write. */
+        streamUpdateEntriesStat(c->db, s); /* entries count decreased */
         keyModified(c,c->db,c->argv[1],kv,1);
         notifyKeyspaceEvent(NOTIFY_STREAM,"xdel",c->argv[1],c->db->id);
         server.dirty += deleted;
@@ -5037,6 +5094,7 @@ void xtrimCommand(client *c) {
         }
 
         /* Propagate the write. */
+        streamUpdateEntriesStat(c->db, s); /* entries count decreased */
         keyModified(c, c->db,c->argv[1], kv, 1);
         server.dirty += deleted;
     }
@@ -5983,6 +6041,9 @@ static void trackStreamIdmpEntries(client *c, robj *key) {
 /* To be used when a stream key was loaded into ram, re-register it in stream_idmp_keys if needed */
 void streamKeyLoaded(redisDb *db, robj *key, robj *val) {
     stream *s = val->ptr;
+    /* Count this stream in the INFO `stream` entries histogram (covers RDB load,
+     * replica load, DEBUG RELOAD, RESTORE, COPY, MOVE and RENAME). */
+    streamUpdateEntriesStat(db, s);
     if (s->idmp_producers != NULL) {
         robj *tracked_key = key;
         if (key->refcount == OBJ_STATIC_REFCOUNT)
@@ -5997,7 +6058,8 @@ void streamKeyLoaded(redisDb *db, robj *key, robj *val) {
 
 /* To be used when a stream key was removed from ram, un-register from stream_idmp_keys if needed */
 void streamKeyRemoved(redisDb *db, robj *key, robj *val) {
-    UNUSED(val);
+    /* Drop this stream's sample from the INFO `stream` entries histogram. */
+    streamRemoveEntriesStat(db, val->ptr);
     dictDelete(db->stream_idmp_keys, key);
 }
 
