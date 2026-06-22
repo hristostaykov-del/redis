@@ -191,13 +191,6 @@ static void streamUpdateStat(redisDb *db, stream *s, streamDistribMetric metric,
     s->hist_bin[metric] = new_bin;
 }
 
-/* Drop all of a stream's histogram samples. Called when the stream key is
- * removed (the stream object is still alive at this point). */
-static void streamRemoveStats(redisDb *db, stream *s) {
-    for (streamDistribMetric m = 0; m < STREAM_DISTRIB_MAX; m++)
-        streamUpdateStat(db, s, m, -1);
-}
-
 /* Set 'id' to be its successor stream ID.
  * If 'id' is the maximal possible id, it is wrapped around to 0-0 and a
  * C_ERR is returned. */
@@ -6083,7 +6076,7 @@ void streamKeyLoaded(redisDb *db, robj *key, robj *val) {
 /* To be used when a stream key was removed from ram, un-register from stream_idmp_keys if needed */
 void streamKeyRemoved(redisDb *db, robj *key, robj *val) {
     /* Drop this stream's sample from the INFO `stream` entries histogram. */
-    streamRemoveStats(db, val->ptr);
+    streamUpdateStat(db, val->ptr, STREAM_DISTRIB_ENTRIES, -1);
     dictDelete(db->stream_idmp_keys, key);
 }
 
