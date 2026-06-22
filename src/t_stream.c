@@ -4182,9 +4182,9 @@ void xackdelCommand(client *c) {
         } else if (first_entry) {
             streamGetEdgeID(s,1,1,&s->first_id);
         }
+        streamUpdateStat(c->db, s, STREAM_DISTRIB_ENTRIES, s->length); /* entries count decreased */
 
         /* Propagate the write. */
-        streamUpdateStat(c->db, s, STREAM_DISTRIB_ENTRIES, s->length); /* entries count decreased */
         keyModified(c,c->db,c->argv[1],kv,1);
         notifyKeyspaceEvent(NOTIFY_STREAM,"xdel",c->argv[1],c->db->id);
     } else if (server.dirty > dirty) {
@@ -5047,9 +5047,9 @@ void xdelexCommand(client *c) {
         } else if (first_entry) {
             streamGetEdgeID(s,1,1,&s->first_id);
         }
+        streamUpdateStat(c->db, s, STREAM_DISTRIB_ENTRIES, s->length); /* entries count decreased */
 
         /* Propagate the write. */
-        streamUpdateStat(c->db, s, STREAM_DISTRIB_ENTRIES, s->length); /* entries count decreased */
         keyModified(c,c->db,c->argv[1],kv,1);
         notifyKeyspaceEvent(NOTIFY_STREAM,"xdel",c->argv[1],c->db->id);
         server.dirty += deleted;
@@ -5116,9 +5116,9 @@ void xtrimCommand(client *c) {
             streamRewriteApproxSpecifier(c,parsed_args.trim_strategy_arg_idx-1);
             streamRewriteTrimArgument(c,s,parsed_args.trim_strategy,parsed_args.trim_strategy_arg_idx);
         }
+        streamUpdateStat(c->db, s, STREAM_DISTRIB_ENTRIES, s->length); /* entries count decreased */
 
         /* Propagate the write. */
-        streamUpdateStat(c->db, s, STREAM_DISTRIB_ENTRIES, s->length); /* entries count decreased */
         keyModified(c, c->db,c->argv[1], kv, 1);
         server.dirty += deleted;
     }
