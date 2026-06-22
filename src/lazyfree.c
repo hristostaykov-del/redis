@@ -27,7 +27,20 @@ static void populateDeltaHistograms(kvstore *kvs, asmTrimCtx *ctx) {
 
     while ((de = kvstoreIteratorNext(&kvs_it)) != NULL) {
         kvobj *kv = dictGetKV(de);
-        if ((!kv) || (kv->type >= OBJ_TYPE_BASIC_MAX)) continue;
+        if (!kv) continue;
+
+        /* Update distrib_streams_entries delta (INFO `stream`). Streams aren't
+         * part of the keysizes/allocsizes histograms below (type > basic max),
+         * and bg slot trim bypasses streamKeyRemoved, so record the sample here.
+         * Use the stream's recorded bin -- where its sample actually sits in the
+         * histogram -- and skip uncounted streams (hist_bin < 0). Gated like the
+         * live histogram. */
+        if (server.stream_stats && kv->type == OBJ_STREAM) {
+            int bin = ((stream *)kv->ptr)->hist_bin[STREAM_DISTRIB_ENTRIES];
+            if (bin >= 0) ctx->delta_distrib_streams_entries[bin]++;
+        }
+
+        if (kv->type >= OBJ_TYPE_BASIC_MAX) continue;
 
         /* Update keysizes_hist delta */
         size_t len = getObjectLength(kv);

@@ -210,6 +210,16 @@ proc reset_default_trim_method {} {
     }
 }
 
+# Return the INFO `stream` distrib_streams_entries histogram for a node's db
+# (e.g. "2=1,4=1"), or "" if absent.
+proc stream_entries_hist {node_id {dbnum 0}} {
+    foreach line [split [R $node_id info stream] "\n"] {
+        set line [string trim $line "\r"]
+        if {[regexp "^db${dbnum}_distrib_streams_entries:(.*)$" $line -> val]} { return $val }
+    }
+    return ""
+}
+
 start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 60000 cluster-allow-replica-migration no}} {
     foreach trim_method {"active" "bg"} {
         test "Simple slot migration (trim method: $trim_method)" {
@@ -285,6 +295,50 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
             R 1 function flush
             R 0 CLUSTER MIGRATION IMPORT 0 100
             wait_for_asm_done
+        }
+    }
+
+    foreach trim_method {"active" "bg"} {
+        test "Slot trim updates distrib_streams_entries histogram (trim method: $trim_method)" {
+            R 0 debug asm-trim-method $trim_method
+            R 0 flushall
+            R 1 flushall
+            R 0 config set stream-stats yes
+            R 1 config set stream-stats yes
+
+            # Streams in slots that will be migrated away (0-100) and one that
+            # stays on R 0 (slot 101). Entry counts chosen for distinct bins.
+            set s0 [slot_key 0 strm]
+            set s1 [slot_key 1 strm]
+            set s101 [slot_key 101 strm]
+            for {set i 1} {$i <= 4} {incr i} { R 0 xadd $s0 $i-1 f v }    ;# 4 -> "4"
+            for {set i 1} {$i <= 8} {incr i} { R 0 xadd $s1 $i-1 f v }    ;# 8 -> "8"
+            for {set i 1} {$i <= 2} {incr i} { R 0 xadd $s101 $i-1 f v }  ;# 2 -> "2"
+            assert_equal "2=1,4=1,8=1" [stream_entries_hist 0]
+
+            # Migrate slots 0-100 to R 1; slot 101 stays on R 0.
+            R 1 CLUSTER MIGRATION IMPORT 0 100
+            wait_for_asm_done
+
+            # Trimming the migrated slots removes their stream keys without going
+            # through streamKeyRemoved (the bg method frees them off-thread), so
+            # R 0's histogram must drop to only the slot-101 stream.
+            wait_for_condition 1000 50 {
+                [stream_entries_hist 0] eq "2=1"
+            } else {
+                fail "distrib_streams_entries not trimmed: [stream_entries_hist 0]"
+            }
+
+            # The importing node counts the migrated streams as they load.
+            assert_equal "4=1,8=1" [stream_entries_hist 1]
+
+            # cleanup: flush and migrate the slots back to R 0.
+            R 0 flushall
+            R 1 flushall
+            R 0 CLUSTER MIGRATION IMPORT 0 100
+            wait_for_asm_done
+            R 0 config set stream-stats no
+            R 1 config set stream-stats no
         }
     }
 }

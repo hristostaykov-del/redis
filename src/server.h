@@ -1248,6 +1248,7 @@ typedef struct asmTrimCtx {
     kvstore *target_kvstore;           /* Target kvstore to update (for validation) */
     keysizesHist delta_keysizes_hist;  /* Delta populated by BIO thread */
     keysizesHist delta_allocsizes_hist;/* Delta populated by BIO thread */
+    int64_t delta_distrib_streams_entries[MAX_KEYSIZES_BINS]; /* INFO `stream`; BIO thread */
 } asmTrimCtx;
 
 /* forward declaration for functions ctx */
