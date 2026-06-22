@@ -89,7 +89,7 @@ stream *streamNew(void) {
     s->idmp_producers = NULL; /* Created on demand to save memory when not used. */
     s->iids_added = 0;
     s->iids_duplicates = 0;
-    s->hist_entries_bin = -1;
+    memset(s->hist_bin, -1, sizeof(s->hist_bin)); /* not counted in any histogram yet */
     return s;
 }
 
@@ -132,13 +132,18 @@ unsigned long streamLength(const robj *subject) {
  * directly from the stream commands that change the tracked property and from
  * the stream key lifecycle hooks (streamKeyLoaded / streamKeyRemoved).
  *
- * Each stream remembers which histogram bin it currently occupies (e.g.
- * s->hist_entries_bin, -1 = not counted), so an update is a cheap move of one
- * sample from the old bin to the new one. The recorded bin -- not the live
- * length -- drives the decrement, which keeps the histogram consistent across a
+ * Each stream remembers which histogram bin it currently occupies per metric
+ * in s->hist_bin[metric] (-1 = not counted), so an update is a cheap move of
+ * one sample from the old bin to the new one. The recorded bin -- not the live
+ * value -- drives the decrement, which keeps the histogram consistent across a
  * stream-stats enable/disable (changes made while disabled aren't tracked, but
  * the next update still subtracts from the bucket the sample was last placed
  * in, not from wherever the property happens to be now).
+ *
+ * A single update function serves every metric: the streamDistribMetric
+ * selector resolves both the per-db histogram row and the stream's recorded-bin
+ * slot, and the caller passes the metric's current value. Adding a metric is
+ * one enumerator (see stream.h) plus one case in streamDistribHistRow.
  *
  * Collection is lazy: it only runs while the `stream-stats` directive is
  * enabled. As a result the gauges are accurate when the directive is set at
@@ -148,12 +153,6 @@ unsigned long streamLength(const robj *subject) {
  * block the server when there are many keys.
  * -------------------------------------------------------------------------- */
 
-/* Selects which per-database stream histogram in kvstoreMetadata to update.
- * Add one enumerator here (and one case in streamDistribHistRow) per metric. */
-typedef enum {
-    STREAM_DISTRIB_ENTRIES = 0,    /* distrib_streams_entries */
-} streamDistribMetric;
-
 /* Return the per-db histogram row for 'metric', or NULL if this db's kvstore
  * carries no metadata (defensive; db->keys always has it in practice). */
 static int64_t *streamDistribHistRow(redisDb *db, streamDistribMetric metric) {
@@ -161,27 +160,26 @@ static int64_t *streamDistribHistRow(redisDb *db, streamDistribMetric metric) {
     if (!meta) return NULL;
     switch (metric) {
     case STREAM_DISTRIB_ENTRIES: return meta->distrib_streams_entries;
+    case STREAM_DISTRIB_MAX: break; /* not a real metric */
     }
     return NULL; /* unreachable: every metric has a case above */
 }
 
-/* Bin a non-negative stream property value (entry count, byte size, ...) the
- * same way the keysizes histogram does: 0 -> bin 0, otherwise log2ceil(v)+1. */
-static inline int streamDistribBin(int64_t value) {
-    int bin = (value == 0) ? 0 : log2ceil(value) + 1;
-    debugServerAssert(bin < MAX_KEYSIZES_BINS);
-    return bin;
-}
+/* Reconcile a stream's sample for 'metric' with 'value', its current value for
+ * that metric (entry count, byte size, ...); pass value < 0 to drop the sample
+ * (the stream is leaving the histogram). The metric selects both the per-db
+ * histogram and the stream's recorded-bin slot, so this one function serves
+ * every metric -- no per-metric variant. Bins are assigned exactly like the
+ * keysizes histogram: 0 -> bin 0, otherwise log2ceil(value)+1. Gated on
+ * stream-stats; see the section comment above. */
+static void streamUpdateStat(redisDb *db, stream *s, streamDistribMetric metric, int64_t value) {
+    if (!server.stream_stats) return;
 
-/* Generic update of a per-database stream histogram: move one sample from
- * 'old_bin' to 'new_bin'. A bin of -1 means "no sample" (a stream entering or
- * leaving the histogram). Shared by every metric via the 'metric' selector so
- * we don't grow a near-identical function per metric; the caller supplies the
- * bins (e.g. from a stream's recorded bin and its current property value). */
-static void streamUpdateDistribHist(redisDb *db, streamDistribMetric metric,
-                                    int old_bin, int new_bin)
-{
+    int old_bin = s->hist_bin[metric];
+    int new_bin = (value < 0) ? -1 : (value == 0) ? 0 : log2ceil(value) + 1;
+    debugServerAssert(new_bin < MAX_KEYSIZES_BINS);
     if (old_bin == new_bin) return;            /* sample didn't move */
+
     int64_t *hist = streamDistribHistRow(db, metric);
     if (!hist) return;
     if (old_bin >= 0) {
@@ -190,22 +188,14 @@ static void streamUpdateDistribHist(redisDb *db, streamDistribMetric metric,
     }
     if (new_bin >= 0)
         hist[new_bin]++;
+    s->hist_bin[metric] = new_bin;
 }
 
-/* Reconcile a stream's entries-histogram sample with its current length. */
-static void streamUpdateEntriesStat(redisDb *db, stream *s) {
-    if (!server.stream_stats) return;
-    int new_bin = streamDistribBin(s->length);
-    streamUpdateDistribHist(db, STREAM_DISTRIB_ENTRIES, s->hist_entries_bin, new_bin);
-    s->hist_entries_bin = new_bin;
-}
-
-/* Drop a stream's entries-histogram sample. Called when a stream key is removed
- * (the stream object is still alive at this point). */
-static void streamRemoveEntriesStat(redisDb *db, stream *s) {
-    if (!server.stream_stats || s->hist_entries_bin < 0) return;
-    streamUpdateDistribHist(db, STREAM_DISTRIB_ENTRIES, s->hist_entries_bin, -1);
-    s->hist_entries_bin = -1;
+/* Drop all of a stream's histogram samples. Called when the stream key is
+ * removed (the stream object is still alive at this point). */
+static void streamRemoveStats(redisDb *db, stream *s) {
+    for (streamDistribMetric m = 0; m < STREAM_DISTRIB_MAX; m++)
+        streamUpdateStat(db, s, m, -1);
 }
 
 /* Set 'id' to be its successor stream ID.
@@ -2702,7 +2692,7 @@ void xaddCommand(client *c) {
     if (server.memory_tracking_enabled)
         updateSlotAllocSize(c->db,getKeySlot(c->argv[1]->ptr),kv,old_alloc,kvobjAllocSize(kv));
 
-    streamUpdateEntriesStat(c->db, s); /* entries count changed (append + trim) */
+    streamUpdateStat(c->db, s, STREAM_DISTRIB_ENTRIES, s->length); /* entries count changed (append + trim) */
 
     keyModified(c,c->db,c->argv[1],kv,1);
 
@@ -3641,7 +3631,7 @@ NULL
             o = createStreamObject();
             dbAdd(c->db, c->argv[2], &o);
             s = o->ptr;
-            streamUpdateEntriesStat(c->db, s); /* count the new (empty) stream */
+            streamUpdateStat(c->db, s, STREAM_DISTRIB_ENTRIES, s->length); /* count the new (empty) stream */
             keyModified(c,c->db,c->argv[2],o,1);
         }
         
@@ -4194,7 +4184,7 @@ void xackdelCommand(client *c) {
         }
 
         /* Propagate the write. */
-        streamUpdateEntriesStat(c->db, s); /* entries count decreased */
+        streamUpdateStat(c->db, s, STREAM_DISTRIB_ENTRIES, s->length); /* entries count decreased */
         keyModified(c,c->db,c->argv[1],kv,1);
         notifyKeyspaceEvent(NOTIFY_STREAM,"xdel",c->argv[1],c->db->id);
     } else if (server.dirty > dirty) {
@@ -4954,7 +4944,7 @@ void xdelCommand(client *c) {
 
     /* Propagate the write if needed. */
     if (deleted) {
-        streamUpdateEntriesStat(c->db, s); /* entries count decreased */
+        streamUpdateStat(c->db, s, STREAM_DISTRIB_ENTRIES, s->length); /* entries count decreased */
         keyModified(c,c->db,c->argv[1],kv,1);
         notifyKeyspaceEvent(NOTIFY_STREAM,"xdel",c->argv[1],c->db->id);
         server.dirty += deleted;
@@ -5059,7 +5049,7 @@ void xdelexCommand(client *c) {
         }
 
         /* Propagate the write. */
-        streamUpdateEntriesStat(c->db, s); /* entries count decreased */
+        streamUpdateStat(c->db, s, STREAM_DISTRIB_ENTRIES, s->length); /* entries count decreased */
         keyModified(c,c->db,c->argv[1],kv,1);
         notifyKeyspaceEvent(NOTIFY_STREAM,"xdel",c->argv[1],c->db->id);
         server.dirty += deleted;
@@ -5128,7 +5118,7 @@ void xtrimCommand(client *c) {
         }
 
         /* Propagate the write. */
-        streamUpdateEntriesStat(c->db, s); /* entries count decreased */
+        streamUpdateStat(c->db, s, STREAM_DISTRIB_ENTRIES, s->length); /* entries count decreased */
         keyModified(c, c->db,c->argv[1], kv, 1);
         server.dirty += deleted;
     }
@@ -6077,7 +6067,7 @@ void streamKeyLoaded(redisDb *db, robj *key, robj *val) {
     stream *s = val->ptr;
     /* Count this stream in the INFO `stream` entries histogram (covers RDB load,
      * replica load, DEBUG RELOAD, RESTORE, COPY, MOVE and RENAME). */
-    streamUpdateEntriesStat(db, s);
+    streamUpdateStat(db, s, STREAM_DISTRIB_ENTRIES, s->length);
     if (s->idmp_producers != NULL) {
         robj *tracked_key = key;
         if (key->refcount == OBJ_STATIC_REFCOUNT)
@@ -6093,7 +6083,7 @@ void streamKeyLoaded(redisDb *db, robj *key, robj *val) {
 /* To be used when a stream key was removed from ram, un-register from stream_idmp_keys if needed */
 void streamKeyRemoved(redisDb *db, robj *key, robj *val) {
     /* Drop this stream's sample from the INFO `stream` entries histogram. */
-    streamRemoveEntriesStat(db, val->ptr);
+    streamRemoveStats(db, val->ptr);
     dictDelete(db->stream_idmp_keys, key);
 }
 
