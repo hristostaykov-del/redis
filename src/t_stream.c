@@ -6058,8 +6058,9 @@ static void trackStreamIdmpEntries(client *c, robj *key) {
 /* To be used when a stream key was loaded into ram, re-register it in stream_idmp_keys if needed */
 void streamKeyLoaded(redisDb *db, robj *key, robj *val) {
     stream *s = val->ptr;
-    /* Count this stream in the INFO `stream` entries histogram (covers RDB load,
-     * replica load, DEBUG RELOAD, RESTORE, COPY, MOVE and RENAME). */
+    /* A whole stream just appeared without any XADD (RDB/replica load, DEBUG
+     * RELOAD, RESTORE, COPY, MOVE), so count it in the INFO `stream` histograms.
+     * This is the one hook all such paths share; mirror of streamKeyRemoved. */
     streamUpdateStat(db, s, STREAM_DISTRIB_ENTRIES, s->length);
     if (s->idmp_producers != NULL) {
         robj *tracked_key = key;
