@@ -34,9 +34,8 @@ typedef struct idmpProducer {
 extern dictType idmpDictType;
 
 /* INFO `stream` section: per-database stream distribution histograms. Each
- * enumerator selects both a per-db histogram (in kvstoreMetadata) and the
- * matching recorded-bin slot in stream.hist_bin[], so a single update function
- * serves every metric. STREAM_DISTRIB_MAX sizes hist_bin[] and bounds loops. */
+ * enumerator selects a per-db histogram (in kvstoreMetadata), so a single
+ * update function serves every metric. STREAM_DISTRIB_MAX bounds loops. */
 typedef enum {
     STREAM_DISTRIB_ENTRIES = 0,    /* distrib_streams_entries */
     STREAM_DISTRIB_MAX
@@ -59,8 +58,6 @@ typedef struct stream {
     rax *idmp_producers;   /* IDMP producers radix tree: pid -> idmpProducer */
     uint64_t iids_added;   /* All time count of entries with IID added. */
     uint64_t iids_duplicates; /* All time count of duplicate IIDs detected. */
-    int8_t hist_bin[STREAM_DISTRIB_MAX]; /* INFO stream: histogram bin recorded per
-                               metric (see streamDistribMetric), -1 if not counted. */
 } stream;
 
 /* We define an iterator to iterate stream items in an abstract way, without

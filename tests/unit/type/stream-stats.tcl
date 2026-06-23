@@ -217,6 +217,33 @@ start_server {tags {"stream cluster:skip"}} {
         assert_equal "" [entries_hist r]
     }
 
+    test {Disabling tracking zeroes the histogram} {
+        r select 9
+        r flushall
+        r config set stream-stats yes
+        r xadd k 1-1 f v
+        assert_equal "1=1" [entries_hist r]
+        r config set stream-stats no
+        r config set stream-stats yes
+        # Disabling wiped the sample; re-enabling starts clean (k is not
+        # recounted until its next write), so the line is empty -- not "1=1".
+        assert_equal "" [entries_hist r]
+    }
+
+    test {Deleting a stream while tracking is disabled leaves no phantom} {
+        r select 9
+        r flushall
+        r config set stream-stats yes
+        r xadd k 1-1 f v
+        assert_equal "1=1" [entries_hist r]
+        r config set stream-stats no
+        r del k
+        r config set stream-stats yes
+        # The sample was zeroed on disable, so the deleted stream leaves no
+        # stale count behind after re-enabling.
+        assert_equal "" [entries_hist r]
+    }
+
     test {Lazy: enabling at runtime does not retroactively count untouched streams} {
         r select 9
         r flushall
