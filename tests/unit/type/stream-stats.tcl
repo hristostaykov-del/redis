@@ -126,6 +126,17 @@ start_server {tags {"stream cluster:skip"}} {
         assert_equal "" [entries_hist r]
     }
 
+    test {DELEX removes the stream's sample} {
+        r select 9
+        r flushall
+        r config set stream-stats yes
+        r xadd k 1-1 f v
+        assert_equal "1=1" [entries_hist r]
+        r delex k
+        assert_equal 0 [r exists k]
+        assert_equal "" [entries_hist r]
+    }
+
     test {Overwriting a stream key with a string removes its sample} {
         r select 9
         r flushall
@@ -142,6 +153,16 @@ start_server {tags {"stream cluster:skip"}} {
         r config set stream-stats yes
         r xadd a 1-1 f v
         r rename a b
+        assert_equal 0 [r exists a]
+        assert_equal "1=1" [entries_hist r]
+    }
+
+    test {RENAMENX keeps the stream counted once} {
+        r select 9
+        r flushall
+        r config set stream-stats yes
+        r xadd a 1-1 f v
+        assert_equal 1 [r renamenx a b]
         assert_equal 0 [r exists a]
         assert_equal "1=1" [entries_hist r]
     }
@@ -204,6 +225,53 @@ start_server {tags {"stream cluster:skip"}} {
         r xadd a 1-1 f v; r xadd a 2-1 f v
         assert_equal "1=1" [entries_hist r 0]
         assert_equal "2=1" [entries_hist r 5]
+        r select 9
+    }
+
+    test {MOVE relocates the stream's sample to the destination db} {
+        r select 9
+        r flushall
+        r config set stream-stats yes
+        r xadd k 1-1 f v; r xadd k 2-1 f v                  ;# 2 entries -> "2"
+        assert_equal "2=1" [entries_hist r 9]
+        assert_equal "" [entries_hist r 10]
+        r move k 10
+        assert_equal "" [entries_hist r 9]
+        assert_equal "2=1" [entries_hist r 10]
+        r flushall
+        r select 9
+    }
+
+    test {SWAPDB swaps the per-db histograms along with the keyspaces} {
+        r select 9
+        r flushall
+        r config set stream-stats yes
+        for {set i 1} {$i <= 4} {incr i} { r xadd a $i-1 f v }   ;# db9: 4 -> "4"
+        r select 10
+        for {set i 1} {$i <= 8} {incr i} { r xadd b $i-1 f v }   ;# db10: 8 -> "8"
+        assert_equal "4=1" [entries_hist r 9]
+        assert_equal "8=1" [entries_hist r 10]
+        r swapdb 9 10
+        assert_equal "8=1" [entries_hist r 9]
+        assert_equal "4=1" [entries_hist r 10]
+        r flushall
+        r select 9
+    }
+
+    test {FLUSHDB clears one db's histogram and leaves others intact} {
+        r select 9
+        r flushall
+        r config set stream-stats yes
+        r xadd a 1-1 f v; r xadd a 2-1 f v                      ;# db9: 2 -> "2"
+        r select 10
+        for {set i 1} {$i <= 4} {incr i} { r xadd b $i-1 f v }  ;# db10: 4 -> "4"
+        assert_equal "2=1" [entries_hist r 9]
+        assert_equal "4=1" [entries_hist r 10]
+        r select 9
+        r flushdb
+        assert_equal "" [entries_hist r 9]
+        assert_equal "4=1" [entries_hist r 10]
+        r flushall
         r select 9
     }
 
