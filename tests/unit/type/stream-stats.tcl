@@ -113,28 +113,22 @@ start_server {tags {"stream cluster:skip"}} {
         assert_equal "0=1" [entries_hist r]
     }
 
-    test {Deleting a stream key removes its sample} {
-        r select 9
-        r flushall
-        r config set stream-stats yes
-        r xadd a 1-1 f v
-        r xadd b 1-1 f v
-        assert_equal "1=2" [entries_hist r]
-        r del a
-        assert_equal "1=1" [entries_hist r]
-        r unlink b
-        assert_equal "" [entries_hist r]
-    }
-
-    test {DELEX removes the stream's sample} {
-        r select 9
-        r flushall
-        r config set stream-stats yes
-        r xadd k 1-1 f v
-        assert_equal "1=1" [entries_hist r]
-        r delex k
-        assert_equal 0 [r exists k]
-        assert_equal "" [entries_hist r]
+    # Every key-delete command must drop the deleted stream's sample (and only
+    # it). We run each command for real rather than assume they share a path.
+    foreach delcmd {del unlink delex} {
+        test "$delcmd removes only the deleted stream's sample" {
+            r select 9
+            r flushall
+            r config set stream-stats yes
+            r xadd a 1-1 f v
+            r xadd b 1-1 f v
+            assert_equal "1=2" [entries_hist r]
+            r $delcmd a
+            assert_equal "1=1" [entries_hist r]
+            r $delcmd b
+            assert_equal 0 [r exists b]
+            assert_equal "" [entries_hist r]
+        }
     }
 
     test {Overwriting a stream key with a string removes its sample} {
@@ -147,24 +141,18 @@ start_server {tags {"stream cluster:skip"}} {
         assert_equal "" [entries_hist r]
     }
 
-    test {RENAME keeps the stream counted once} {
-        r select 9
-        r flushall
-        r config set stream-stats yes
-        r xadd a 1-1 f v
-        r rename a b
-        assert_equal 0 [r exists a]
-        assert_equal "1=1" [entries_hist r]
-    }
-
-    test {RENAMENX keeps the stream counted once} {
-        r select 9
-        r flushall
-        r config set stream-stats yes
-        r xadd a 1-1 f v
-        assert_equal 1 [r renamenx a b]
-        assert_equal 0 [r exists a]
-        assert_equal "1=1" [entries_hist r]
+    # Every rename command moves the sample to the new key name, keeping the
+    # stream counted exactly once.
+    foreach rencmd {rename renamenx} {
+        test "$rencmd keeps the stream counted once" {
+            r select 9
+            r flushall
+            r config set stream-stats yes
+            r xadd a 1-1 f v
+            r $rencmd a b
+            assert_equal 0 [r exists a]
+            assert_equal "1=1" [entries_hist r]
+        }
     }
 
     test {COPY counts the duplicated stream} {
