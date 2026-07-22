@@ -2791,16 +2791,12 @@ int updateClusterHumanNodename(const char **err) {
     return 1;
 }
 
-/* Reject tls-expected-peer-name at config time (startup and CONFIG SET) when the
- * TLS build cannot verify peer certificate names, instead of accepting it and
- * then refusing every connection. An empty value clears the option and is always
- * allowed. If TLS is not available yet (e.g. not compiled in, or a TLS module not
- * loaded during startup parsing), we accept it here; the per-connection check
- * remains as a backstop. */
+/* Validate tls-expected-peer-name at config time (startup and CONFIG SET). An
+ * empty value clears the option and is always allowed. */
 static int isValidTlsExpectedPeerName(char *val, const char **err) {
     if (val[0] == '\0') return 1;
 
-    /* A non-empty value must contain at least one name token; tlsSetVerifyName()
+    /* A non-empty value must contain at least one name token; the verification
      * splits it on spaces, so a whitespace-only value (e.g. a quoted line of
      * spaces) yields no tokens and would make it reject every connection while
      * the config still looks set. Reject such a value here; use an empty string
@@ -2808,13 +2804,6 @@ static int isValidTlsExpectedPeerName(char *val, const char **err) {
     if (strspn(val, " ") == strlen(val)) {
         *err = "tls-expected-peer-name contains no usable name; "
                "use an empty string to disable it";
-        return 0;
-    }
-
-    ConnectionType *ct_tls = connectionTypeTls();
-    if (ct_tls && ct_tls->supports_verify_name && !ct_tls->supports_verify_name()) {
-        *err = "tls-expected-peer-name requires certificate name verification "
-               "support, available only when built against OpenSSL 1.0.2 or newer";
         return 0;
     }
     return 1;

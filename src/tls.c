@@ -43,9 +43,12 @@
 #define REDIS_TLS_PROTO_DEFAULT     (REDIS_TLS_PROTO_TLSv1_2)
 #endif
 
-/* Whether this build can verify peer certificate name(s): the X509_VERIFY_PARAM
- * host API used by tlsSetVerifyName() is available since OpenSSL 1.0.2. */
-#define CONN_TLS_SUPPORTS_VERIFY_NAME (OPENSSL_VERSION_NUMBER >= 0x10002000L)
+/* OpenSSL >= 1.0.2 provides the X509_VERIFY_PARAM host-verification API
+ * (X509_VERIFY_PARAM_set1_host & friends), which enforces the peer certificate
+ * name check inside the handshake. On older builds we perform the equivalent
+ * check ourselves via a certificate verify callback (tlsVerifyPeerNameCallback).
+ * Either way peer-name verification is supported. */
+#define CONN_TLS_HAS_VERIFY_PARAM_API (OPENSSL_VERSION_NUMBER >= 0x10002000L)
 
 SSL_CTX *redis_tls_ctx = NULL;
 SSL_CTX *redis_tls_client_ctx = NULL;
@@ -436,6 +439,10 @@ typedef struct tls_connection {
     int flags;
     SSL *ssl;
     char *ssl_error;
+    char *verify_name;          /* Expected peer certificate name(s) to verify
+                                   during the handshake. Only used (and set) on
+                                   builds without the X509_VERIFY_PARAM host API
+                                   (OpenSSL < 1.0.2); NULL otherwise. */
     listNode *pending_list_node;
 } tls_connection;
 
@@ -449,6 +456,9 @@ static connection *createTLSConnection(struct aeEventLoop *el, int client_side) 
     conn->c.el = el;
     conn->c.iovcnt = IOV_MAX;
     conn->ssl = SSL_new(ctx);
+    /* Link the SSL back to its connection so the certificate verify callback
+     * (used for peer-name verification on OpenSSL < 1.0.2) can reach it. */
+    if (conn->ssl) SSL_set_app_data(conn->ssl, conn);
     return (connection *) conn;
 }
 
@@ -878,6 +888,11 @@ static void connTLSClose(connection *conn_) {
         conn->ssl = NULL;
     }
 
+    if (conn->verify_name) {
+        zfree(conn->verify_name);
+        conn->verify_name = NULL;
+    }
+
     if (conn->ssl_error) {
         zfree(conn->ssl_error);
         conn->ssl_error = NULL;
@@ -921,30 +936,157 @@ static int connTLSAccept(connection *_conn, ConnectionCallbackFunc accept_handle
     return C_OK;
 }
 
-/* Report whether this build can verify peer certificate name(s). Used by the
- * config layer to reject tls-expected-peer-name early rather than failing per
- * connection. */
-static int connTLSSupportsVerifyName(void) {
-    return CONN_TLS_SUPPORTS_VERIFY_NAME;
+#if !CONN_TLS_HAS_VERIFY_PARAM_API
+/* --- Peer certificate name matching for OpenSSL < 1.0.2 ---------------------
+ * These builds lack the X509_VERIFY_PARAM host API / X509_check_host(), so we
+ * reproduce the subset of that behaviour tls-expected-peer-name relies on:
+ * match a configured DNS name against the certificate's subjectAltName dNSName
+ * entries (falling back to the subject CN only when no dNSName SAN is present),
+ * case-insensitively, honouring a single full-label leading wildcard
+ * ("*.example.com"). Partial/multi-label wildcards, IDNA specifics, and the
+ * e-mail/IP name types are intentionally not implemented -- they are not used
+ * by this option. This mirrors the X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS,
+ * default-SAN-then-CN behaviour of the newer-OpenSSL path above. */
+
+/* Case-insensitive (ASCII) compare of two byte ranges. The certificate-supplied
+ * name (pat) must not contain an embedded NUL. */
+static int tlsNameEqualNoCase(const char *pat, size_t plen, const char *sub, size_t slen) {
+    if (plen != slen) return 0;
+    for (size_t i = 0; i < plen; i++) {
+        unsigned char l = (unsigned char) pat[i], r = (unsigned char) sub[i];
+        if (l == 0) return 0;               /* NUL embedded in the certificate name */
+        if (l != r) {
+            if (l >= 'A' && l <= 'Z') l += 'a' - 'A';
+            if (r >= 'A' && r <= 'Z') r += 'a' - 'A';
+            if (l != r) return 0;
+        }
+    }
+    return 1;
 }
 
-/* Configure the SSL object to verify the peer certificate's SAN/CN against the
- * given space-separated list of expected name(s), in addition to CA chain
- * validation. Used to bind server-to-server connections to a specific identity
+/* A certificate name is a wildcard we honour iff it is "*.<rest>" where '*' is
+ * the whole first label and there are at least two dots ("*.example.com" yes,
+ * "*.com" no), with no other '*'. */
+static int tlsNameIsWildcard(const char *pat, size_t plen) {
+    if (plen < 2 || pat[0] != '*' || pat[1] != '.') return 0;
+    int dots = 0;
+    for (size_t i = 0; i < plen; i++) {
+        if (pat[i] == '.') dots++;
+        else if (pat[i] == '*') return 0;   /* only one '*', already at index 0 */
+    }
+    return dots >= 2;
+}
+
+/* Match "*.<suffix>" against a concrete subject: the subject must be
+ * "<label>.<suffix>" where <label> is a single non-empty dot-free label and
+ * <suffix> matches case-insensitively. */
+static int tlsNameWildcardMatch(const char *pat, size_t plen, const char *sub, size_t slen) {
+    const char *suffix = pat + 1;           /* ".<rest>" (keeps the leading dot) */
+    size_t suffix_len = plen - 1;
+    if (slen <= suffix_len) return 0;
+    size_t label_len = slen - suffix_len;   /* the part matched by '*' */
+    if (label_len == 0) return 0;
+    for (size_t i = 0; i < label_len; i++)
+        if (sub[i] == '.') return 0;        /* '*' matches a single label only */
+    return tlsNameEqualNoCase(suffix, suffix_len, sub + label_len, suffix_len);
+}
+
+/* Match one certificate name (a SAN dNSName or a CN) against one expected name. */
+static int tlsNamePatternMatch(const char *pat, size_t plen, const char *name) {
+    size_t nlen = strlen(name);
+    if (tlsNameIsWildcard(pat, plen))
+        return tlsNameWildcardMatch(pat, plen, name, nlen);
+    return tlsNameEqualNoCase(pat, plen, name, nlen);
+}
+
+/* Return 1 if the certificate matches the single expected DNS name. Checks the
+ * subjectAltName dNSName entries; only if none are present does it fall back to
+ * the subject CN (matching the default X509_check_host behaviour). */
+static int tlsCertMatchesName(X509 *cert, const char *name) {
+    int matched = 0, san_dns_present = 0;
+    GENERAL_NAMES *gens = X509_get_ext_d2i(cert, NID_subject_alt_name, NULL, NULL);
+    if (gens) {
+        int n = sk_GENERAL_NAME_num(gens);
+        for (int i = 0; i < n && !matched; i++) {
+            GENERAL_NAME *gen = sk_GENERAL_NAME_value(gens, i);
+            if (gen->type != GEN_DNS) continue;
+            san_dns_present = 1;
+            ASN1_IA5STRING *dns = gen->d.dNSName;
+            if (dns && dns->data && dns->length > 0 &&
+                tlsNamePatternMatch((const char *) dns->data, (size_t) dns->length, name))
+                matched = 1;
+        }
+        GENERAL_NAMES_free(gens);
+        if (matched) return 1;
+        if (san_dns_present) return 0;      /* SAN present but no match: no CN fallback */
+    }
+
+    X509_NAME *subject = X509_get_subject_name(cert);
+    int i = -1;
+    while ((i = X509_NAME_get_index_by_NID(subject, NID_commonName, i)) >= 0) {
+        X509_NAME_ENTRY *ne = X509_NAME_get_entry(subject, i);
+        ASN1_STRING *cn = X509_NAME_ENTRY_get_data(ne);
+        unsigned char *utf8 = NULL;
+        int len = ASN1_STRING_to_UTF8(&utf8, cn);
+        if (len < 0) continue;
+        int m = tlsNamePatternMatch((const char *) utf8, (size_t) len, name);
+        OPENSSL_free(utf8);
+        if (m) return 1;
+    }
+    return 0;
+}
+
+/* Return 1 if the certificate matches ANY of the space-separated expected names
+ * (mirrors the match-any semantics of SSL_add1_host on newer OpenSSL). */
+static int tlsCertMatchesAnyName(X509 *cert, const char *names) {
+    char *copy = zstrdup(names);
+    char *saveptr = NULL;
+    int matched = 0;
+    for (char *tok = strtok_r(copy, " ", &saveptr);
+         tok != NULL && !matched;
+         tok = strtok_r(NULL, " ", &saveptr))
+        if (tlsCertMatchesName(cert, tok)) matched = 1;
+    zfree(copy);
+    return matched;
+}
+
+/* Certificate verify callback that adds the peer-name check at the leaf, during
+ * the handshake, so a mismatch aborts SSL_connect()/SSL_accept() before any data
+ * is exchanged -- the same effect X509_VERIFY_PARAM_set1_host() has on newer
+ * OpenSSL. The chain result is preserved for every other certificate. */
+static int tlsVerifyPeerNameCallback(int preverify_ok, X509_STORE_CTX *ctx) {
+    /* Only augment the leaf; pass CA/intermediate results through unchanged. */
+    if (X509_STORE_CTX_get_error_depth(ctx) != 0) return preverify_ok;
+    /* If the leaf already failed chain validation, keep it failed. */
+    if (!preverify_ok) return 0;
+
+    SSL *ssl = X509_STORE_CTX_get_ex_data(ctx, SSL_get_ex_data_X509_STORE_CTX_idx());
+    tls_connection *conn = ssl ? SSL_get_app_data(ssl) : NULL;
+    if (conn == NULL || conn->verify_name == NULL || conn->verify_name[0] == '\0')
+        return preverify_ok;                /* no expected name for this connection */
+
+    X509 *cert = X509_STORE_CTX_get_current_cert(ctx);
+    if (cert != NULL && tlsCertMatchesAnyName(cert, conn->verify_name))
+        return 1;
+
+    /* No configured name matched: reject, aborting the handshake. */
+    X509_STORE_CTX_set_error(ctx, X509_V_ERR_APPLICATION_VERIFICATION);
+    return 0;
+}
+#endif /* !CONN_TLS_HAS_VERIFY_PARAM_API */
+
+/* Configure the connection's SSL to verify the peer certificate's SAN/CN against
+ * the given space-separated list of expected name(s), in addition to CA chain
+ * validation. This binds server-to-server connections to a specific identity
  * (tls-expected-peer-name) rather than trusting any CA-signed certificate. The
- * name(s) come from local configuration, never from the wire. A subsequent
- * handshake fails with X509_V_ERR_HOSTNAME_MISMATCH if no listed name matches.
- * Returns C_OK on success, C_ERR if a name could not be applied or the value
- * contained no usable name. */
-static int tlsSetVerifyName(SSL *ssl, const char *names) {
-#if CONN_TLS_SUPPORTS_VERIFY_NAME
-    /* Use the X509_VERIFY_PARAM_* host API (available since OpenSSL 1.0.2) rather
-     * than the SSL_set1_host()/SSL_add1_host()/SSL_set_hostflags() convenience
-     * wrappers (introduced only in OpenSSL 1.1.0). This keeps certificate name
-     * verification available on every OpenSSL version that actually provides the
-     * hostname-checking machinery, matching the older versions the rest of this
-     * file still supports. */
-    X509_VERIFY_PARAM *param = SSL_get0_param(ssl);
+ * name(s) come from local configuration, never from the wire. A mismatch fails
+ * the handshake. Returns C_OK on success, C_ERR if a name could not be applied
+ * or the value contained no usable name. */
+static int tlsSetVerifyName(tls_connection *conn, const char *names) {
+#if CONN_TLS_HAS_VERIFY_PARAM_API
+    /* OpenSSL >= 1.0.2: use the X509_VERIFY_PARAM host API. It is checked inside
+     * the handshake and covers SAN/CN, wildcards and match-any for us. */
+    X509_VERIFY_PARAM *param = SSL_get0_param(conn->ssl);
 
     /* Reject partial-label wildcards (e.g. "f*.example.com"); a full-label
      * "*.example.com" still matches. */
@@ -970,15 +1112,14 @@ static int tlsSetVerifyName(SSL *ssl, const char *names) {
      * token (e.g. all whitespace). Either way, fail closed. */
     return (ok && !first) ? C_OK : C_ERR;
 #else
-    /* Certificate name verification relies on the X509_VERIFY_PARAM host API,
-     * introduced in OpenSSL 1.0.2. On older builds we cannot honor
-     * tls-expected-peer-name, so fail closed rather than connect unverified. */
-    UNUSED(ssl);
-    UNUSED(names);
-    serverLog(LL_WARNING,
-        "tls-expected-peer-name is set but peer certificate name verification "
-        "requires OpenSSL 1.0.2 or newer; refusing the connection.");
-    return C_ERR;
+    /* OpenSSL < 1.0.2: no built-in host API. Remember the expected name(s) and
+     * install a verify callback that checks the leaf certificate during the
+     * handshake (see tlsVerifyPeerNameCallback). */
+    zfree(conn->verify_name);
+    conn->verify_name = zstrdup(names);
+    /* Preserve the existing verify mode; add our leaf-name check on top. */
+    SSL_set_verify(conn->ssl, SSL_get_verify_mode(conn->ssl), tlsVerifyPeerNameCallback);
+    return C_OK;
 #endif
 }
 
@@ -988,7 +1129,7 @@ static int tlsSetVerifyName(SSL *ssl, const char *names) {
 static int connTLSSetVerifyName(connection *conn_, const char *name) {
     tls_connection *conn = (tls_connection *) conn_;
     if (!conn->ssl || !name || !name[0]) return C_OK;
-    if (tlsSetVerifyName(conn->ssl, name) != C_OK) {
+    if (tlsSetVerifyName(conn, name) != C_OK) {
         serverLog(LL_WARNING, "Failed to set expected TLS peer name on accepted connection");
         return C_ERR;
     }
@@ -1005,7 +1146,7 @@ static int connTLSSetVerifyName(connection *conn_, const char *name) {
 static int tlsApplyExpectedPeerName(tls_connection *conn, const char *addr) {
     const char *name = server.tls_ctx_config.expected_peer_name;
     if (!name || !name[0]) return C_OK;
-    if (tlsSetVerifyName(conn->ssl, name) != C_OK) {
+    if (tlsSetVerifyName(conn, name) != C_OK) {
         serverLog(LL_WARNING,
             "Failed to set expected TLS peer name for outbound connection to %s", addr);
         conn->c.state = CONN_STATE_ERROR;
@@ -1351,7 +1492,6 @@ static ConnectionType CT_TLS = {
     .get_peer_cert = connTLSGetPeerCert,
     .get_peer_username = tlsGetPeerUsername,
     .set_verify_name = connTLSSetVerifyName,
-    .supports_verify_name = connTLSSupportsVerifyName,
 };
 
 int RedisRegisterConnectionTypeTLS(void) {
