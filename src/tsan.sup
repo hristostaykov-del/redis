@@ -19,3 +19,4 @@ race:malloc_mutex_trylock_final
 #   execution which would incur too big of a cost.
 # - the race happens rarely
 race:connSocketAddr
+race:unmarkClientAsPubSub
