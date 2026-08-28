@@ -1297,6 +1297,14 @@ void kvsAsyncFreeDoneCB(uint64_t client_id, void *userdata) {
                     meta->allocsizes_hist[type][bin] -= ctx->delta_allocsizes_hist[type][bin];
                 }
             }
+            /* distrib_streams_entries is a single-row histogram (not per-type).
+             * Clamp at 0: a runtime stream-stats toggle can leave the live
+             * histogram holding fewer samples than the delta accounts for. */
+            for (int bin = 0; bin < MAX_KEYSIZES_BINS; bin++) {
+                int64_t d = ctx->delta_distrib_streams_entries[bin];
+                int64_t *cur = &meta->distrib_streams_entries[bin];
+                *cur = (*cur > d) ? (*cur - d) : 0;
+            }
         }
         /* Decrement counter unconditionally to track job completion. If kvstore was
          * replaced (e.g., by FLUSHALL), the new histogram is already consistent (reset

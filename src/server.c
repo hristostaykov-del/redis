@@ -547,6 +547,7 @@ static void kvstoreOnEmpty(kvstore *kvs) {
     kvstoreMetadata *meta = kvstoreGetMetadata(kvs);
     memset(&meta->keysizes_hist, 0, sizeof(meta->keysizes_hist));
     memset(&meta->allocsizes_hist, 0, sizeof(meta->allocsizes_hist));
+    memset(&meta->distrib_streams_entries, 0, sizeof(meta->distrib_streams_entries));
 }
 
 static void kvstoreOnDictEmpty(kvstore *kvs, int didx) {
@@ -6361,7 +6362,9 @@ void totalNumberOfStatefulKeys(unsigned long *blocking_keys, unsigned long *bloc
 
 /* Append keysizes histograms to the info string in format "db<dbnum>_<field_name>:<label>=<count>,..."
  * field_names is an array of field names indexed by type, NULL entries are skipped. */
-static sds sdscatHistograms(sds info, int dbnum, keysizesHist histogram, const char *field_names[]) {
+/* Append a single base-2 histogram row as "db<N>_<field>:<label>=<count>,...".
+ * Only non-empty bins are listed; the line is omitted when the row is empty. */
+static sds sdscatHistogramRow(sds info, int dbnum, const char *field, const int64_t *row) {
     static const char *expSizeLabels[] = {
         "0", "1",   "2",  "4",  "8",  "16",  "32",  "64",  "128",  "256",  "512", /* Byte */
         "1K", "2K", "4K", "8K", "16K", "32K", "64K", "128K", "256K", "512K", /* Kilo */
@@ -6372,27 +6375,29 @@ static sds sdscatHistograms(sds info, int dbnum, keysizesHist histogram, const c
         "1E", "2E", "4E"                                                     /* Exa */
     };
 
+    char buf[10000];
+    int cnt = 0, buflen = 0;
+
+    buflen += snprintf(buf + buflen, sizeof(buf) - buflen, "db%d_%s:", dbnum, field);
+
+    for (int i = 0; i < MAX_KEYSIZES_BINS; i++) {
+        if (row[i] == 0) continue;
+        int res = snprintf(buf + buflen, sizeof(buf) - buflen,
+                           (cnt == 0) ? "%s=%llu" : ",%s=%llu",
+                           expSizeLabels[i], (unsigned long long) row[i]);
+        if (res < 0) break;
+        buflen += res;
+        cnt += row[i];
+    }
+
+    if (cnt) info = sdscatprintf(info, "%s\r\n", buf);
+    return info;
+}
+
+static sds sdscatHistograms(sds info, int dbnum, keysizesHist histogram, const char *field_names[]) {
     for (int type = 0; type < OBJ_TYPE_BASIC_MAX; type++) {
         if (field_names[type] == NULL) continue;
-
-        char buf[10000];
-        int cnt = 0, buflen = 0;
-
-        buflen += snprintf(buf + buflen, sizeof(buf) - buflen, "db%d_%s:", dbnum, field_names[type]);
-
-        for (int i = 0; i < MAX_KEYSIZES_BINS; i++) {
-            if (histogram[type][i] == 0)
-                continue;
-
-            int res = snprintf(buf + buflen, sizeof(buf) - buflen,
-                               (cnt == 0) ? "%s=%llu" : ",%s=%llu",
-                               expSizeLabels[i], (unsigned long long) histogram[type][i]);
-            if (res < 0) break;
-            buflen += res;
-            cnt += histogram[type][i];
-        }
-
-        if (cnt) info = sdscatprintf(info, "%s\r\n", buf);
+        info = sdscatHistogramRow(info, dbnum, field_names[type], histogram[type]);
     }
     return info;
 }
@@ -7121,6 +7126,23 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
 
             /* Allocation sizes distribution */
             info = sdscatHistograms(info, dbnum, meta->allocsizes_hist, type_sizes_str);
+        }
+    }
+
+    /* Stream statistics (per-db distribution histograms).
+     * Everything-only section: not part of the default set. Populated only when
+     * the stream-stats directive is enabled; otherwise just the header. */
+    if (all_sections || (dictFind(section_dict,"stream") != NULL)) {
+        if (sections++) info = sdscat(info,"\r\n");
+        info = sdscatprintf(info, "# Stream\r\n");
+
+        if (server.stream_stats) {
+            for (int dbnum = 0; dbnum < server.dbnum; dbnum++) {
+                kvstoreMetadata *meta = kvstoreGetMetadata(server.db[dbnum].keys);
+                if (!meta) continue;
+                info = sdscatHistogramRow(info, dbnum, "distrib_streams_entries",
+                                          meta->distrib_streams_entries);
+            }
         }
     }
 

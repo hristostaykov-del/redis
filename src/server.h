@@ -1254,6 +1254,7 @@ typedef int64_t keysizesHist[MAX_KEYSIZES_TYPES][MAX_KEYSIZES_BINS];
 typedef struct {
     keysizesHist keysizes_hist;
     keysizesHist allocsizes_hist;
+    int64_t distrib_streams_entries[MAX_KEYSIZES_BINS];
 } kvstoreMetadata;
 
 /* Like kvstoreMetadata, this one per dict */
@@ -1272,6 +1273,7 @@ typedef struct asmTrimCtx {
     kvstore *target_kvstore;           /* Target kvstore to update (for validation) */
     keysizesHist delta_keysizes_hist;  /* Delta populated by BIO thread */
     keysizesHist delta_allocsizes_hist;/* Delta populated by BIO thread */
+    int64_t delta_distrib_streams_entries[MAX_KEYSIZES_BINS]; /* INFO `stream`; BIO thread */
 } asmTrimCtx;
 
 /* forward declaration for functions ctx */
@@ -2591,6 +2593,7 @@ struct redisServer {
     /* Stream IDMP parameters */
     long long stream_idmp_duration;     /* Default IDMP duration in seconds. */
     long long stream_idmp_maxsize;      /* Default IDMP max entries. */
+    int stream_stats;                   /* Enable stream stats for INFO `stream` section. */
     /* Array parameters */
     uint32_t array_slice_size;          /* Slice size for new arrays */
     uint32_t array_sparse_kmax;         /* Max elements before sparse->dense */
