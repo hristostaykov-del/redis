@@ -8613,3 +8613,10 @@ int main(int argc, char **argv) {
 }
 
 /* The End */
+
+/* LAYOUT PROBE -- benchmark control only, never to be merged. Dead code that
+ * is never called; it exists solely to shift the placement of every function
+ * linked after it, so that two semantically identical builds can be compared. */
+__attribute__((used, noinline)) void layoutProbeNeverCalled(void) {
+    __asm__ volatile(".fill 192,1,0x90");
+}
