@@ -8386,6 +8386,7 @@ int zsetTest(int argc, char **argv, int flags);
 int zsetBtreeTest(int argc, char **argv, int flags);
 int vectorTest(int argc, char **argv, int flags);
 int lzfTest(int argc, char **argv, int flags);
+int iheapTest(int argc, char **argv, int flags);
 struct redisTest {
     char *name;
     redisTestProc *proc;
@@ -8409,6 +8410,7 @@ struct redisTest {
     {"fwtree", fwtreeTest},
     {"estore", estoreTest},
     {"ebuckets", ebucketsTest},
+    {"iheap", iheapTest},
     {"vector", vectorTest},
     {"bitmap", bitopsTest},
     {"rax", raxTest},
