@@ -4256,7 +4256,7 @@ standardConfig static_configs[] = {
     createBoolConfig("lua-enable-deprecated-api", NULL, IMMUTABLE_CONFIG | HIDDEN_CONFIG, server.lua_enable_deprecated_api, 0, NULL, NULL),
     createBoolConfig("key-memory-histograms", NULL, MODIFIABLE_CONFIG, server.key_memory_histograms, 0, NULL, updateMemoryTrackingEnabled),
     createBoolConfig("bitmap-default-roaring", NULL, MODIFIABLE_CONFIG, server.bitmap_default_roaring, 0, NULL, NULL),
-    createBoolConfig("stream-stats", NULL, MODIFIABLE_CONFIG, server.stream_stats, 0, NULL, applyStreamStats),
+    createBoolConfig("stream-stats", NULL, MODIFIABLE_CONFIG, server.stream_stats, 1, NULL, applyStreamStats),
     createBoolConfig("config-rewrite-source-aware", NULL, IMMUTABLE_CONFIG | HIDDEN_CONFIG, server.config_rewrite_source_aware, 0, NULL, NULL),
 
     /* String Configs */
